@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<!--
+  Generic import sidebar for the Payroll Import & Cost Dashboard template.
+  The original author's sidebar was not published; this is a minimal, generic
+  replacement. Replace freely. No company data is present.
+-->
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { font-family: Arial, sans-serif; font-size: 13px; margin: 12px; color: #222; }
+      label { display: block; margin: 10px 0 4px; font-weight: bold; }
+      input, select { width: 100%; box-sizing: border-box; padding: 6px; }
+      button { margin-top: 14px; padding: 8px 14px; cursor: pointer; }
+      #status { margin-top: 12px; white-space: pre-wrap; }
+      .muted { color: #666; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <p class="muted">Paste the source export URL, choose the month, and import into the master sheet.</p>
+
+    <label for="url">Source spreadsheet URL</label>
+    <input id="url" type="text" placeholder="https://docs.google.com/spreadsheets/d/.../edit" />
+
+    <label for="year">Year</label>
+    <input id="year" type="number" value="2026" />
+
+    <label for="month">Month</label>
+    <select id="month">
+      <option value="1">Jan</option><option value="2">Feb</option><option value="3">Mar</option>
+      <option value="4">Apr</option><option value="5">May</option><option value="6">Jun</option>
+      <option value="7">Jul</option><option value="8">Aug</option><option value="9">Sep</option>
+      <option value="10">Oct</option><option value="11">Nov</option><option value="12">Dec</option>
+    </select>
+
+    <button onclick="runImport()">Import</button>
+    <div id="status"></div>
+
+    <script>
+      function runImport() {
+        var url = document.getElementById('url').value.trim();
+        var year = Number(document.getElementById('year').value);
+        var month = Number(document.getElementById('month').value);
+        document.getElementById('status').textContent = 'Importing…';
+        google.script.run
+          .withSuccessHandler(function (res) {
+            document.getElementById('status').textContent =
+              res.success ? '✅ ' + res.message : '❌ ' + res.message;
+          })
+          .withFailureHandler(function (err) {
+            document.getElementById('status').textContent = '❌ ' + err.message;
+          })
+          .importPayrollFromUrl(url, year, month);
+      }
+    </script>
+  </body>
+</html>
