@@ -1,0 +1,762 @@
+/**
+ * Payroll Import & Cost Dashboard — Reusable Template
+ * 100% AI-generated, 100% human-directed.
+ * Directed and iterated by Yordhan Fitrians Akhmad B. based on real HR pain points —
+ * refined repeatedly for business fit, user experience, and workflow comfort.
+ * Published as a generic, reusable template. Configure everything via the ⚙️ Setup menu.
+ */
+
+// ============================================================================
+// WHAT THIS DOES (generic):
+//   - Imports a monthly payroll/roster export into a single "master" sheet.
+//   - Assigns each person a Group + Group Lead using a configurable mapping.
+//   - Reads a pre-built summary sheet to render a lightweight cost dashboard.
+//   - Optionally calls the Anthropic API for narrative insights.
+//
+// EVERYTHING environment-specific (API key, sheet/tab names, optional source
+// URL) is entered ONCE through the "⚙️ Setup" menu and stored in Script
+// Properties. No secrets, IDs, or company data live in this file.
+//
+// NOTE ON SCHEMA: The import schema below is a DELIBERATELY SIMPLIFIED,
+// SYNTHETIC EXAMPLE. The original author works with confidential HR data and
+// cannot publish the production column mapping. Replace SCHEMA + mappings with
+// your own before use.
+// ============================================================================
+
+
+// ─── CONFIG KEYS (stored in Script Properties, set via Setup menu) ───────────
+
+const CONFIG_KEYS = {
+  API_KEY:            'ANTHROPIC_API_KEY',    // secret; never hardcode a value
+  MODEL:              'ANTHROPIC_MODEL',      // e.g. a current Claude model id
+  SOURCE_TAB:         'SOURCE_TAB_NAME',      // tab name inside the uploaded export
+  MASTER_SHEET:       'MASTER_SHEET_NAME',    // where imported rows are appended
+  SUMMARY_SHEET:      'SUMMARY_SHEET_NAME',   // your pivot/summary sheet
+  INSIGHTS_SHEET:     'INSIGHTS_SHEET_NAME',  // where AI insights are written
+  DEFAULT_SOURCE_URL: 'DEFAULT_SOURCE_URL',   // optional; blank by default (no real IDs)
+};
+
+// Sensible defaults so the template runs before the user customizes anything.
+const CONFIG_DEFAULTS = {
+  ANTHROPIC_MODEL:      'claude-sonnet-4-5',  // set to your preferred model in Setup
+  SOURCE_TAB_NAME:      'Worksheet',
+  MASTER_SHEET_NAME:    'master',
+  SUMMARY_SHEET_NAME:   'Summary',
+  INSIGHTS_SHEET_NAME:  'AI Insights',
+  DEFAULT_SOURCE_URL:   '',
+};
+
+/** Reads all config from Script Properties, falling back to defaults. */
+function getConfig_() {
+  const props = PropertiesService.getScriptProperties();
+  const cfg = {};
+  for (const key of Object.values(CONFIG_KEYS)) {
+    cfg[key] = props.getProperty(key) || CONFIG_DEFAULTS[key] || '';
+  }
+  return cfg;
+}
+
+/** Writes a single config value to Script Properties. */
+function saveConfig_(key, value) {
+  PropertiesService.getScriptProperties().setProperty(key, String(value).trim());
+}
+
+
+// ─── IMPORT SCHEMA — SYNTHETIC EXAMPLE ONLY (replace for production) ──────────
+// This is a demonstration schema, NOT production. The real mapping must be
+// supplied by whoever adapts this template. Column names and values here are
+// generic placeholders. Keep the SHAPE (Month + IDs + a few pay components),
+// swap the specifics.
+
+const SCHEMA = {
+
+  // Master sheet column order (1-indexed) → field name.
+  MASTER_COLUMNS: {
+    1:  'Month',
+    2:  'Group Lead',       // rolled-up owner (assigned by this script)
+    3:  'Group',            // rolled-up unit  (assigned by this script)
+    4:  'Employee ID',
+    5:  'Full Name',
+    6:  'Role',
+    7:  'Department',
+    8:  'Status',
+    9:  'Location',
+    10: 'Join Date',
+    11: 'Base Pay',
+    12: 'Allowances',
+    13: 'Bonus',            // example one-time component (see toggle logic)
+    14: 'Tax Withheld',
+    15: 'Deductions',
+    16: 'Net Pay',
+    17: 'Employer Cost',
+  },
+
+  // Source export header → master field. Add variants as your exports require.
+  IMPORT_FIELD_MAP: {
+    'Employee ID': 'Employee ID',
+    'Full Name':   'Full Name',
+    'Role':        'Role',
+    'Department':  'Department',
+    'Status':      'Status',
+    'Location':    'Location',
+    'Join Date':   'Join Date',
+    'Base Pay':    'Base Pay',
+    'Allowances':  'Allowances',
+    'Bonus':       'Bonus',
+    'Tax Withheld':'Tax Withheld',
+    'Deductions':  'Deductions',
+    'Net Pay':     'Net Pay',
+    'Employer Cost':'Employer Cost',
+  },
+
+  // Row on which the source export's column headers sit (0-based).
+  // Set to match your export; the example assumes a short banner above headers.
+  HEADER_ROW_INDEX: 5,
+
+  // First data row (0-based).
+  FIRST_DATA_ROW: 6,
+
+  // Values in the ID column that mark non-employee rows to skip.
+  SKIP_IDS: ['Employee ID', 'GRAND TOTAL', 'NOTES:', 'SUBTOTAL', 'ADJUSTMENT'],
+};
+
+
+// ─── ASSIGNMENT RULES — generic placeholders ─────────────────────────────────
+// Demonstration mapping. Replace names/departments with your own.
+
+const RULES = {
+  // Roles treated as unit-level (assigned Group Lead = '-', Group = '-').
+  EXCLUDED_ROLES: ['Site Manager'],
+
+  // Only these locations count as central/HQ; others may be excluded per rules.
+  HQ_LOCATIONS: ['Headquarters'],
+
+  // Department name used for field/site staff in the exclusion rules below.
+  FIELD_DEPARTMENT: 'Field Operations',
+
+  // A field-only role that is excluded when outside HQ.
+  FIELD_ROLE: 'Field Associate',
+
+  // Department → Group.
+  DEPT_TO_GROUP: {
+    'Engineering':      'Technology',
+    'Design':           'Technology',
+    'Product':          'Technology',
+    'Field Operations': 'Operations',
+    'Finance':          'Corporate',
+    'People':           'Corporate',
+    'Legal':            'Corporate',
+    'Marketing':        'Growth',
+    'Sales':            'Growth',
+  },
+
+  // Group → default Group Lead (generic placeholders).
+  GROUP_TO_LEAD: {
+    'Technology':  'Group Lead A',
+    'Operations':  'Group Lead B',
+    'Corporate':   'Group Lead C',
+    'Growth':      'Group Lead C',
+  },
+};
+
+
+// ─── MENU ────────────────────────────────────────────────────────────────────
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('⚙️ Setup')
+    .addItem('Set Anthropic API Key', 'setupApiKey')
+    .addItem('Set Model', 'setupModel')
+    .addItem('Set Sheet / Tab Names', 'setupSheetNames')
+    .addItem('Set Default Source URL (optional)', 'setupSourceUrl')
+    .addSeparator()
+    .addItem('View Current Config', 'viewConfig')
+    .addSeparator()
+    .addItem('Import Payroll Month', 'showImportSidebar')
+    .addItem('Open Dashboard', 'showDashboard')
+    .addItem('Generate AI Insights', 'generateInsights')
+    .addToUi();
+}
+
+function setupApiKey() {
+  const ui = SpreadsheetApp.getUi();
+  const r = ui.prompt('Anthropic API Key', 'Enter your API key (stored in Script Properties, never in code):', ui.ButtonSet.OK_CANCEL);
+  if (r.getSelectedButton() === ui.Button.OK) {
+    saveConfig_(CONFIG_KEYS.API_KEY, r.getResponseText());
+    ui.alert('API key saved.');
+  }
+}
+
+function setupModel() {
+  const ui = SpreadsheetApp.getUi();
+  const r = ui.prompt('Model', 'Enter the model id to use (e.g. a current Claude model):', ui.ButtonSet.OK_CANCEL);
+  if (r.getSelectedButton() === ui.Button.OK) {
+    saveConfig_(CONFIG_KEYS.MODEL, r.getResponseText());
+    ui.alert('Model saved.');
+  }
+}
+
+function setupSheetNames() {
+  const ui = SpreadsheetApp.getUi();
+  const cfg = getConfig_();
+  const ask = (label, key) => {
+    const r = ui.prompt(label, `Current: "${cfg[key]}". Enter new value (or leave blank to keep):`, ui.ButtonSet.OK_CANCEL);
+    if (r.getSelectedButton() === ui.Button.OK && r.getResponseText().trim()) saveConfig_(key, r.getResponseText());
+  };
+  ask('Source export tab name', CONFIG_KEYS.SOURCE_TAB);
+  ask('Master sheet name',      CONFIG_KEYS.MASTER_SHEET);
+  ask('Summary sheet name',     CONFIG_KEYS.SUMMARY_SHEET);
+  ask('AI Insights sheet name', CONFIG_KEYS.INSIGHTS_SHEET);
+  ui.alert('Sheet names saved.');
+}
+
+function setupSourceUrl() {
+  const ui = SpreadsheetApp.getUi();
+  const r = ui.prompt('Default Source URL (optional)', 'Paste a default export spreadsheet URL, or leave blank:', ui.ButtonSet.OK_CANCEL);
+  if (r.getSelectedButton() === ui.Button.OK) {
+    saveConfig_(CONFIG_KEYS.DEFAULT_SOURCE_URL, r.getResponseText());
+    ui.alert('Default source URL saved.');
+  }
+}
+
+function viewConfig() {
+  const cfg = getConfig_();
+  const masked = cfg[CONFIG_KEYS.API_KEY] ? '••••••• (set)' : '(not set)';
+  const msg =
+    'API Key:        ' + masked + '\n' +
+    'Model:          ' + cfg[CONFIG_KEYS.MODEL] + '\n' +
+    'Source Tab:     ' + cfg[CONFIG_KEYS.SOURCE_TAB] + '\n' +
+    'Master Sheet:   ' + cfg[CONFIG_KEYS.MASTER_SHEET] + '\n' +
+    'Summary Sheet:  ' + cfg[CONFIG_KEYS.SUMMARY_SHEET] + '\n' +
+    'Insights Sheet: ' + cfg[CONFIG_KEYS.INSIGHTS_SHEET] + '\n' +
+    'Default URL:    ' + (cfg[CONFIG_KEYS.DEFAULT_SOURCE_URL] || '(none)');
+  SpreadsheetApp.getUi().alert('Current Config', msg, SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+function showImportSidebar() {
+  const html = HtmlService.createHtmlOutputFromFile('ImportSidebar')
+    .setTitle('Import Payroll Month').setWidth(420);
+  SpreadsheetApp.getUi().showSidebar(html);
+}
+
+function showDashboard() {
+  const html = HtmlService.createHtmlOutputFromFile('Dashboard')
+    .setWidth(1100).setHeight(750).setTitle('Cost Dashboard');
+  SpreadsheetApp.getUi().showModalDialog(html, 'Dashboard');
+}
+
+
+// ─── CORE IMPORT ENGINE (writes to the master sheet ONLY) ────────────────────
+
+/**
+ * Import a month of data from a source spreadsheet URL.
+ * @param {string} sourceUrl - source spreadsheet URL (or ID)
+ * @param {number} year
+ * @param {number} month - 1-12
+ * @return {object} { success, message, stats }
+ */
+function importPayrollFromUrl(sourceUrl, year, month) {
+  try {
+    const cfg = getConfig_();
+    const url = sourceUrl || cfg[CONFIG_KEYS.DEFAULT_SOURCE_URL];
+    if (!url) throw new Error('No source URL provided and no default configured.');
+
+    const source = SpreadsheetApp.openById(extractSheetId_(url));
+    const tab = source.getSheetByName(cfg[CONFIG_KEYS.SOURCE_TAB]);
+    if (!tab) throw new Error('Tab "' + cfg[CONFIG_KEYS.SOURCE_TAB] + '" not found in source.');
+
+    const rawData = tab.getDataRange().getValues();
+    return processImport_(rawData, year, month, cfg);
+  } catch (e) {
+    return { success: false, message: 'Error: ' + e.toString() };
+  }
+}
+
+/** Import from an in-memory 2D array (e.g. parsed CSV). */
+function importPayrollFromData(data, year, month) {
+  try {
+    return processImport_(data, year, month, getConfig_());
+  } catch (e) {
+    return { success: false, message: 'Error: ' + e.toString() };
+  }
+}
+
+/** Shared import pipeline. */
+function processImport_(rawData, year, month, cfg) {
+  const monthDate = new Date(year, month - 1, 1);
+  const monthLabel = monthName_(month - 1) + ' ' + year;
+
+  // Map source columns → master fields using the header row.
+  const subHeaders = (rawData[SCHEMA.HEADER_ROW_INDEX] || []).map(v => v ? String(v).trim() : '');
+  const colIdx = {};
+  subHeaders.forEach((h, i) => {
+    if (h && SCHEMA.IMPORT_FIELD_MAP[h]) colIdx[SCHEMA.IMPORT_FIELD_MAP[h]] = i;
+  });
+  if (colIdx['Employee ID'] === undefined) {
+    throw new Error('Could not find an "Employee ID" column on header row ' + SCHEMA.HEADER_ROW_INDEX + '. Adjust SCHEMA for your export.');
+  }
+
+  const skip = new Set(SCHEMA.SKIP_IDS);
+  const employees = [];
+  for (let r = SCHEMA.FIRST_DATA_ROW; r < rawData.length; r++) {
+    const eid = rawData[r][colIdx['Employee ID']];
+    if (!eid || skip.has(String(eid).trim())) continue;
+    const emp = {};
+    for (const [field, idx] of Object.entries(colIdx)) emp[field] = rawData[r][idx];
+    employees.push(emp);
+  }
+  if (employees.length === 0) throw new Error('No data rows found. Check SCHEMA.FIRST_DATA_ROW / header mapping.');
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const master = ss.getSheetByName(cfg[CONFIG_KEYS.MASTER_SHEET]);
+  if (!master) throw new Error('Master sheet "' + cfg[CONFIG_KEYS.MASTER_SHEET] + '" not found.');
+
+  const dlMap = buildLeadMap_(master.getDataRange().getValues());
+  const processed = employees.map(emp => assignGroup_(emp, dlMap));
+  const included = processed.filter(e => !e._excluded);
+
+  appendToMaster_(master, processed, monthDate);
+
+  const stats = {
+    totalEmployees:    processed.length,
+    includedEmployees: included.length,
+    excludedEmployees: processed.length - included.length,
+    totalNetPay:       included.reduce((s, e) => s + (Number(e['Net Pay']) || 0), 0),
+    byLead: {},
+    byGroup: {},
+  };
+  included.forEach(e => {
+    const lead = e['Group Lead'] || '-';
+    const grp = e['Group'] || '-';
+    stats.byLead[lead]  = (stats.byLead[lead]  || 0) + (Number(e['Net Pay']) || 0);
+    stats.byGroup[grp]  = (stats.byGroup[grp]  || 0) + (Number(e['Net Pay']) || 0);
+  });
+
+  return {
+    success: true,
+    message: 'Imported ' + monthLabel + ' to master sheet (' + processed.length + ' rows). Refresh pivots/summaries.',
+    stats,
+  };
+}
+
+
+// ─── ASSIGNMENT LOGIC ────────────────────────────────────────────────────────
+
+function buildLeadMap_(masterData) {
+  const map = {};
+  const headers = masterData[0] || [];
+  const eidCol  = headers.indexOf('Employee ID');
+  const leadCol = headers.indexOf('Group Lead');
+  const grpCol  = headers.indexOf('Group');
+  if (eidCol === -1) return map;
+
+  for (let r = 1; r < masterData.length; r++) {
+    const eid  = masterData[r][eidCol];
+    const lead = masterData[r][leadCol];
+    const grp  = masterData[r][grpCol];
+    if (!eid) continue;
+    if (!map[eid]) map[eid] = { lead: '-', group: '-', wasDash: false };
+    if (lead === '-' || !lead) map[eid].wasDash = true;
+    if (lead && lead !== '-') { map[eid].lead = lead; map[eid].group = grp || '-'; }
+  }
+  return map;
+}
+
+function assignGroup_(emp, dlMap) {
+  const eid  = String(emp['Employee ID'] || '').trim();
+  const dept = String(emp['Department'] || '').trim();
+  const loc  = String(emp['Location'] || '').trim();
+  const role = String(emp['Role'] || '').trim();
+
+  let excluded = false;
+
+  // Rule 1: unit-level roles.
+  if (RULES.EXCLUDED_ROLES.some(p => role.includes(p))) excluded = true;
+
+  // Rule 2: field department outside HQ.
+  if (dept === RULES.FIELD_DEPARTMENT && !RULES.HQ_LOCATIONS.includes(loc)) excluded = true;
+
+  // Rule 3: field-only role outside HQ.
+  if (role.includes(RULES.FIELD_ROLE) && !RULES.HQ_LOCATIONS.includes(loc)) excluded = true;
+
+  // Rule 4: historically unassigned AND still field department outside HQ.
+  if (dlMap[eid] && dlMap[eid].wasDash && !RULES.HQ_LOCATIONS.includes(loc) && dept === RULES.FIELD_DEPARTMENT) {
+    excluded = true;
+  }
+
+  if (excluded) {
+    emp['Group Lead'] = '-';
+    emp['Group'] = '-';
+    emp._excluded = true;
+    return emp;
+  }
+
+  if (dlMap[eid] && dlMap[eid].lead !== '-') {
+    emp['Group Lead'] = dlMap[eid].lead;
+    emp['Group'] = dlMap[eid].group;
+  } else {
+    const group = RULES.DEPT_TO_GROUP[dept] || '-';
+    emp['Group'] = group;
+    emp['Group Lead'] = RULES.GROUP_TO_LEAD[group] || '-';
+  }
+
+  emp._excluded = false;
+  return emp;
+}
+
+
+// ─── MASTER SHEET WRITER ─────────────────────────────────────────────────────
+
+function appendToMaster_(sheet, employees, monthDate) {
+  const fieldToCol = {};
+  for (const [col, field] of Object.entries(SCHEMA.MASTER_COLUMNS)) fieldToCol[field] = Number(col);
+  const numCols = Math.max(...Object.keys(SCHEMA.MASTER_COLUMNS).map(Number));
+
+  const rows = employees.map(emp => {
+    const row = new Array(numCols).fill('');
+    for (const [field, col] of Object.entries(fieldToCol)) {
+      let val = (field === 'Month') ? monthDate : emp[field];
+      if (val !== undefined && val !== null && val !== '') row[col - 1] = val;
+    }
+    return row;
+  });
+  if (rows.length === 0) return;
+
+  // Batch writes + retry: large single writes to sheets with many dependent
+  // formulas can trigger transient backend errors. Small committed batches avoid it.
+  const BATCH_SIZE = 15;
+  const MAX_RETRIES = 3;
+
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const chunk = rows.slice(i, i + BATCH_SIZE);
+    const startRow = sheet.getLastRow() + 1;
+    let ok = false;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        sheet.getRange(startRow, 1, chunk.length, numCols).setValues(chunk);
+        SpreadsheetApp.flush();
+        ok = true;
+        break;
+      } catch (e) {
+        if (attempt < MAX_RETRIES) {
+          Utilities.sleep(2000 * attempt);
+        } else {
+          throw new Error('Failed to write rows ' + (i + 1) + '-' + (i + chunk.length) +
+            ' after ' + MAX_RETRIES + ' attempts. Rows 1-' + i + ' were written. ' + e.toString());
+        }
+      }
+    }
+    if (!ok) break;
+  }
+}
+
+
+// ─── UTILITY ─────────────────────────────────────────────────────────────────
+
+function extractSheetId_(url) {
+  const match = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  if (match) return match[1];
+  if (/^[a-zA-Z0-9_-]+$/.test(url)) return url;
+  throw new Error('Could not extract spreadsheet ID from: ' + url);
+}
+
+function monthName_(idx) {
+  return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][idx];
+}
+
+function getAvailableMonths() {
+  const cfg = getConfig_();
+  const master = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(cfg[CONFIG_KEYS.MASTER_SHEET]);
+  if (!master || master.getLastRow() < 2) return [];
+  const data = master.getRange(2, 1, master.getLastRow() - 1, 1).getValues();
+  const seen = new Set();
+  const months = [];
+  data.forEach(r => {
+    if (!r[0]) return;
+    const d = new Date(r[0]);
+    const label = monthName_(d.getMonth()) + ' ' + d.getFullYear();
+    if (!seen.has(label)) { seen.add(label); months.push(label); }
+  });
+  return months;
+}
+
+
+// ─── DASHBOARD DATA (reads from your Summary sheet) ──────────────────────────
+// The row/column offsets below map to a SPECIFIC summary-sheet layout and are
+// EXAMPLE VALUES. Adjust SUMMARY_LAYOUT to match your own pivot/summary sheet.
+
+const SUMMARY_LAYOUT = {
+  READ_ROWS: 55,          // how many rows to read
+  READ_COLS: 32,          // how many cols to read
+  HEADER_ROW: 2,          // 0-based row holding period headers
+  FIRST_VALUE_COL: 2,     // 0-based first column holding numbers
+  LEAD_ROWS: [4, 5, 6, 7, 8],    // rows: Net Pay by Group Lead
+  GRAND_TOTAL_ROW: 9,            // row: Net Pay grand total
+  GROUP_ROWS: [20, 21, 22, 23, 24], // rows: Net Pay by Group
+  REVENUE_ROW: 15,        // row: revenue (or any headline metric)
+  METRIC_A_ROW: 16,
+  METRIC_B_ROW: 17,
+  EMPLOYER_COST_TOTAL_ROW: 50,
+  EMPLOYER_COST_GROUP_ROWS: [45, 46, 47, 48, 49],
+  // Generic placeholder labels — replace to match your summary sheet rows.
+  LEAD_NAMES:  ['Group Lead A', 'Group Lead B', 'Group Lead C', 'Group Lead D', 'Group Lead E'],
+  GROUP_NAMES: ['Corporate', 'Growth', 'Technology', 'Operations', 'Other'],
+};
+
+function getDashboardData() {
+  const cfg = getConfig_();
+  const summary = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(cfg[CONFIG_KEYS.SUMMARY_SHEET]);
+  if (!summary) throw new Error('Summary sheet "' + cfg[CONFIG_KEYS.SUMMARY_SHEET] + '" not found.');
+
+  const L = SUMMARY_LAYOUT;
+  const sa = summary.getRange(1, 1, L.READ_ROWS, L.READ_COLS).getValues();
+
+  const headers = [];
+  for (let c = L.FIRST_VALUE_COL; c < L.READ_COLS; c++) {
+    const v = sa[L.HEADER_ROW][c];
+    if (!v) break;
+    headers.push(String(v).replace(' Total', ''));
+  }
+  const n = headers.length;
+  const slice = rowIdx => sa[rowIdx].slice(L.FIRST_VALUE_COL, L.FIRST_VALUE_COL + n).map(v => v || 0);
+
+  const netByLead = {};
+  L.LEAD_ROWS.forEach((ri, i) => { netByLead[L.LEAD_NAMES[i]] = slice(ri); });
+
+  const grandTotals = slice(L.GRAND_TOTAL_ROW);
+
+  const netByGroup = {};
+  L.GROUP_ROWS.forEach((ri, i) => { netByGroup[L.GROUP_NAMES[i]] = slice(ri); });
+
+  const finance = {
+    revenue:  sa[L.REVENUE_ROW].slice(L.FIRST_VALUE_COL, L.FIRST_VALUE_COL + n).map(v => v || null),
+    metricA:  sa[L.METRIC_A_ROW].slice(L.FIRST_VALUE_COL, L.FIRST_VALUE_COL + n).map(v => v || null),
+    metricB:  sa[L.METRIC_B_ROW].slice(L.FIRST_VALUE_COL, L.FIRST_VALUE_COL + n).map(v => v || null),
+  };
+
+  const employerCostTotal = slice(L.EMPLOYER_COST_TOTAL_ROW);
+  const employerCostByGroup = {};
+  L.EMPLOYER_COST_GROUP_ROWS.forEach((ri, i) => { employerCostByGroup[L.GROUP_NAMES[i]] = slice(ri); });
+
+  const revPerSalary = headers.map((_, i) => {
+    const rev = finance.revenue[i], net = grandTotals[i];
+    return (rev && net) ? rev / net : null;
+  });
+
+  return { months: headers, netByLead, netByGroup, grandTotals, employerCostByGroup, employerCostTotal, finance, headcounts: {}, revPerSalary };
+}
+
+/** Headcount per month from the master sheet (called after initial render). */
+function getHeadcountData() {
+  const cfg = getConfig_();
+  const master = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(cfg[CONFIG_KEYS.MASTER_SHEET]);
+  if (!master || master.getLastRow() <= 1) return { total: {} };
+
+  const idCol = master.getDataRange().getValues()[0].indexOf('Employee ID');
+  const data = master.getRange(2, 1, master.getLastRow() - 1, master.getLastColumn()).getValues();
+  const counts = {};
+  data.forEach(row => {
+    const mv = row[0];
+    if (!mv) return;
+    const d = mv instanceof Date ? mv : new Date(mv);
+    const key = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+    if (!counts[key]) counts[key] = new Set();
+    counts[key].add(row[idCol]);
+  });
+  const out = {};
+  for (const [k, v] of Object.entries(counts)) out[k] = v.size;
+  return { total: out };
+}
+
+/**
+ * Example one-time-component breakdown (the "Bonus" toggle on the dashboard).
+ * Demonstration logic only: sums the Bonus component per month by Group.
+ * If some one-time payouts are disbursed off-cycle in your real data, add your
+ * own reconciliation before trusting this figure.
+ */
+function getBonusBreakdown() {
+  const cfg = getConfig_();
+  const master = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(cfg[CONFIG_KEYS.MASTER_SHEET]);
+  if (!master || master.getLastRow() <= 1) return {};
+
+  const headers = master.getRange(1, 1, 1, master.getLastColumn()).getValues()[0];
+  const col = {};
+  ['Month', 'Group Lead', 'Group', 'Bonus'].forEach(f => { col[f] = headers.indexOf(f); });
+
+  const data = master.getRange(2, 1, master.getLastRow() - 1, master.getLastColumn()).getValues();
+  const byMonth = {};
+  for (let r = 0; r < data.length; r++) {
+    const mv = data[r][col['Month']];
+    if (!mv) continue;
+    if (data[r][col['Group Lead']] === '-') continue;
+    const bonus = Number(data[r][col['Bonus']]) || 0;
+    if (bonus === 0) continue;
+
+    const d = mv instanceof Date ? mv : new Date(mv);
+    const key = monthName_(d.getMonth()) + ' ' + d.getFullYear();
+    if (!byMonth[key]) byMonth[key] = { total: 0, byLead: {}, byGroup: {} };
+    byMonth[key].total += bonus;
+    const lead = data[r][col['Group Lead']];
+    const grp = data[r][col['Group']] || '-';
+    byMonth[key].byLead[lead]  = (byMonth[key].byLead[lead]  || 0) + bonus;
+    byMonth[key].byGroup[grp]  = (byMonth[key].byGroup[grp]  || 0) + bonus;
+  }
+  return byMonth;
+}
+
+/**
+ * Benchmark scaffold for a "revenue per salary" style tab.
+ * Values here are ILLUSTRATIVE PLACEHOLDERS, not real market data or real
+ * company figures. Replace with your own sourced benchmarks.
+ */
+function getBenchmarkData() {
+  return {
+    lastUpdated: new Date().toLocaleDateString(),
+    revPerSalary: {
+      exampleEarly:  { label: 'Example — Early Stage', range: '0.3-1.0x', note: 'Placeholder. Replace with sourced data.' },
+      exampleMature: { label: 'Example — Mature',      range: '1.5-3.0x', note: 'Placeholder. Replace with sourced data.' },
+    },
+    interpretation: [
+      { range: '< 1.0x',   verdict: 'Below breakeven', color: '#c5221f', desc: 'Placeholder interpretation.' },
+      { range: '1.0-2.0x', verdict: 'Thin margin',     color: '#e37400', desc: 'Placeholder interpretation.' },
+      { range: '2.0-4.0x', verdict: 'Healthy',         color: '#137333', desc: 'Placeholder interpretation.' },
+      { range: '> 4.0x',   verdict: 'Efficient',       color: '#1a73e8', desc: 'Placeholder interpretation.' },
+    ],
+    context: 'Replace this string with your own analysis. All figures above are placeholders.',
+    sources: ['Add your own benchmark sources here.'],
+  };
+}
+
+
+// ─── AI INSIGHTS (Anthropic API) ─────────────────────────────────────────────
+
+// Generic analyst prompt. No company, country, or sector specifics. Customize
+// the domain context for your own organization if you want sharper output.
+const SYSTEM_PROMPT =
+  'You are a senior compensation & payroll analyst advising a company leadership team. ' +
+  'All currency figures are provided as-is. Before flagging any month-over-month change as an ' +
+  'anomaly, decompose it into its components (base pay, allowances, one-time bonuses, tax ' +
+  'withholding, statutory contributions, severance, headcount change). Many swings are explained ' +
+  'by seasonal bonuses, annual tax true-ups, statutory-ceiling adjustments, or joiners/leavers — ' +
+  'check those first. Only flag a genuine anomaly when the components do not explain the delta. ' +
+  'Compare like-for-like by stripping out one-time items to see the normalized trend. ' +
+  'Be direct, data-driven, and actionable.';
+
+function getClaudeInsights(customPrompt) {
+  const cfg = getConfig_();
+  const apiKey = cfg[CONFIG_KEYS.API_KEY];
+  if (!apiKey) return { error: 'No API key. Use ⚙️ Setup → Set Anthropic API Key.' };
+
+  const summary = buildSummary_(getDashboardData(), getComponentData_());
+  const userMsg = (customPrompt || 'Give me 5 key insights for this month. Decompose any pay changes into components before concluding.') + '\n\n' + summary;
+
+  try {
+    const response = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
+      method: 'post',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      payload: JSON.stringify({
+        model: cfg[CONFIG_KEYS.MODEL],
+        max_tokens: 3000,
+        system: SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: userMsg }],
+      }),
+      muteHttpExceptions: true,
+    });
+    const result = JSON.parse(response.getContentText());
+    return result.error ? { error: result.error.message } : { insights: result.content[0].text };
+  } catch (e) {
+    return { error: e.toString() };
+  }
+}
+
+/** Aggregate the (synthetic) components per month from the master sheet. */
+function getComponentData_() {
+  const cfg = getConfig_();
+  const master = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(cfg[CONFIG_KEYS.MASTER_SHEET]);
+  const all = master.getDataRange().getValues();
+  const headers = all[0];
+  const col = {};
+  ['Month', 'Group Lead', 'Group', 'Base Pay', 'Allowances', 'Bonus', 'Tax Withheld', 'Deductions', 'Net Pay', 'Employer Cost']
+    .forEach(f => { col[f] = headers.indexOf(f); });
+
+  const byMonth = {};
+  for (let r = 1; r < all.length; r++) {
+    const mv = all[r][col['Month']];
+    if (!mv) continue;
+    if (all[r][col['Group Lead']] === '-') continue; // included population only
+    const d = mv instanceof Date ? mv : new Date(mv);
+    const key = monthName_(d.getMonth()) + ' ' + d.getFullYear();
+    if (!byMonth[key]) byMonth[key] = { headcount: 0, basePay: 0, allowances: 0, bonus: 0, taxWithheld: 0, deductions: 0, netPay: 0, employerCost: 0 };
+    const m = byMonth[key];
+    m.headcount++;
+    m.basePay      += Number(all[r][col['Base Pay']])      || 0;
+    m.allowances   += Number(all[r][col['Allowances']])    || 0;
+    m.bonus        += Number(all[r][col['Bonus']])         || 0;
+    m.taxWithheld  += Number(all[r][col['Tax Withheld']])  || 0;
+    m.deductions   += Number(all[r][col['Deductions']])    || 0;
+    m.netPay       += Number(all[r][col['Net Pay']])       || 0;
+    m.employerCost += Number(all[r][col['Employer Cost']]) || 0;
+  }
+  return byMonth;
+}
+
+function buildSummary_(data, components) {
+  const f = v => v ? 'Rp ' + (v / 1e6).toFixed(1) + 'M' : '-';
+  const lines = ['=== NET PAY GRAND TOTALS (from Summary) ==='];
+  data.months.forEach((m, i) => lines.push(m + ': ' + f(data.grandTotals[i])));
+
+  lines.push('\n=== COMPONENT BREAKDOWN (per month, included population) ===');
+  const order = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const keys = Object.keys(components).sort((a, b) => {
+    const [am, ay] = a.split(' '), [bm, by] = b.split(' ');
+    return (Number(ay) * 12 + order.indexOf(am)) - (Number(by) * 12 + order.indexOf(bm));
+  });
+  keys.slice(-6).forEach(key => {
+    const m = components[key];
+    lines.push('\n--- ' + key + ' (' + m.headcount + ' people) ---');
+    lines.push('  Base Pay:      ' + f(m.basePay));
+    lines.push('  Allowances:    ' + f(m.allowances));
+    lines.push('  Bonus:         ' + f(m.bonus));
+    lines.push('  Tax Withheld:  ' + f(m.taxWithheld));
+    lines.push('  Deductions:    ' + f(m.deductions));
+    lines.push('  >>> Net Pay:   ' + f(m.netPay));
+    lines.push('  >>> Employer Cost: ' + f(m.employerCost));
+  });
+
+  if (keys.length >= 2) {
+    const curr = components[keys[keys.length - 1]], prev = components[keys[keys.length - 2]];
+    lines.push('\n=== MONTH-OVER-MONTH DELTA: ' + keys[keys.length - 2] + ' → ' + keys[keys.length - 1] + ' ===');
+    lines.push('  Headcount:    ' + prev.headcount + ' → ' + curr.headcount + ' (' + (curr.headcount - prev.headcount >= 0 ? '+' : '') + (curr.headcount - prev.headcount) + ')');
+    lines.push('  Base Pay:     ' + f(curr.basePay - prev.basePay) + ' change');
+    lines.push('  Bonus:        ' + f(curr.bonus - prev.bonus) + ' change');
+    lines.push('  Tax Withheld: ' + f(curr.taxWithheld - prev.taxWithheld) + ' change');
+    lines.push('  Net Pay:      ' + f(curr.netPay - prev.netPay) + ' change');
+    lines.push('  Employer Cost:' + f(curr.employerCost - prev.employerCost) + ' change');
+  }
+
+  lines.push('\n=== FINANCE (from Summary) ===');
+  data.months.forEach((m, i) => {
+    const rev = data.finance.revenue[i];
+    if (rev) lines.push(m + ': Rev=' + f(rev) + ', Rev/Sal=' + (data.revPerSalary[i] ? data.revPerSalary[i].toFixed(2) : 'N/A') + 'x');
+  });
+  return lines.join('\n');
+}
+
+function generateInsights() {
+  const ui = SpreadsheetApp.getUi();
+  const cfg = getConfig_();
+  const result = getClaudeInsights();
+  if (result.error) { ui.alert('Error', result.error, ui.ButtonSet.OK); return; }
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(cfg[CONFIG_KEYS.INSIGHTS_SHEET]);
+  if (!sheet) sheet = ss.insertSheet(cfg[CONFIG_KEYS.INSIGHTS_SHEET]);
+  sheet.clear();
+  sheet.getRange('A1').setValue('AI-Generated Insights').setFontWeight('bold').setFontSize(14);
+  sheet.getRange('A2').setValue('Generated: ' + new Date().toLocaleString()).setFontColor('#666');
+  sheet.getRange('A4').setValue(result.insights).setWrap(true);
+  sheet.setColumnWidth(1, 800);
+  ui.alert('Done', 'Insights written to "' + cfg[CONFIG_KEYS.INSIGHTS_SHEET] + '".', ui.ButtonSet.OK);
+}
+
+function getInsightsForDashboard(question) {
+  return getClaudeInsights(question);
+}
