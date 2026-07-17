@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<!--
+  Generic dashboard for the Payroll Import & Cost Dashboard template.
+  The original author's full dashboard was not published; this is a minimal,
+  generic replacement that calls the same server functions. Replace freely.
+  No company data is present.
+-->
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { font-family: Arial, sans-serif; font-size: 13px; margin: 16px; color: #222; }
+      h2 { margin: 0 0 4px; }
+      table { border-collapse: collapse; margin-top: 12px; width: 100%; }
+      th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: right; }
+      th:first-child, td:first-child { text-align: left; }
+      th { background: #f4f4f4; }
+      #insights { margin-top: 20px; }
+      textarea { width: 100%; height: 60px; box-sizing: border-box; }
+      button { padding: 6px 12px; cursor: pointer; margin-top: 6px; }
+      pre { white-space: pre-wrap; background: #fafafa; border: 1px solid #eee; padding: 10px; }
+      .muted { color: #666; }
+    </style>
+  </head>
+  <body>
+    <h2>Cost Dashboard</h2>
+    <div class="muted" id="loading">Loading…</div>
+    <div id="report"></div>
+
+    <div id="insights" style="display:none">
+      <h3>AI Insights</h3>
+      <textarea id="q" placeholder="Optional: ask a specific question…"></textarea>
+      <br><button onclick="askAI()">Generate Insights</button>
+      <pre id="answer" style="display:none"></pre>
+    </div>
+
+    <script>
+      function fmt(v) { return v ? 'Rp ' + (v / 1e6).toFixed(1) + 'M' : '-'; }
+
+      function render(data) {
+        document.getElementById('loading').style.display = 'none';
+        var months = data.months || [];
+        var html = '<table><tr><th>Metric</th>';
+        months.forEach(function (m) { html += '<th>' + m + '</th>'; });
+        html += '</tr>';
+
+        html += '<tr><td>Net Pay (grand total)</td>';
+        (data.grandTotals || []).forEach(function (v) { html += '<td>' + fmt(v) + '</td>'; });
+        html += '</tr>';
+
+        html += '<tr><td>Employer Cost (total)</td>';
+        (data.employerCostTotal || []).forEach(function (v) { html += '<td>' + fmt(v) + '</td>'; });
+        html += '</tr>';
+
+        html += '<tr><td>Revenue</td>';
+        ((data.finance && data.finance.revenue) || []).forEach(function (v) { html += '<td>' + fmt(v) + '</td>'; });
+        html += '</tr>';
+
+        html += '<tr><td>Rev / Salary</td>';
+        (data.revPerSalary || []).forEach(function (v) { html += '<td>' + (v ? v.toFixed(2) + 'x' : '-') + '</td>'; });
+        html += '</tr></table>';
+
+        document.getElementById('report').innerHTML = html;
+        document.getElementById('insights').style.display = 'block';
+      }
+
+      function askAI() {
+        var q = document.getElementById('q').value.trim();
+        var el = document.getElementById('answer');
+        el.style.display = 'block';
+        el.textContent = 'Thinking…';
+        google.script.run
+          .withSuccessHandler(function (res) { el.textContent = res.error ? '❌ ' + res.error : res.insights; })
+          .withFailureHandler(function (err) { el.textContent = '❌ ' + err.message; })
+          .getInsightsForDashboard(q);
+      }
+
+      google.script.run
+        .withSuccessHandler(render)
+        .withFailureHandler(function (err) {
+          document.getElementById('loading').textContent = '❌ ' + err.message;
+        })
+        .getDashboardData();
+    </script>
+  </body>
+</html>
